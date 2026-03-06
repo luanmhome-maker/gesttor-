@@ -309,6 +309,8 @@
       <span id="sync-dot" style="width:7px;height:7px;border-radius:50%;display:inline-block"></span>
       <span id="sync-label"></span>
     </div>
+    <button id="btn-sync-manual" onclick="syncManual()" title="Sincronizar agora com a nuvem" style="background:rgba(34,211,238,.12);border:1px solid rgba(34,211,238,.3);color:var(--accent2);font-size:10px;font-weight:700;padding:3px 10px;border-radius:5px;cursor:pointer;font-family:'Syne',sans-serif;white-space:nowrap">☁️ Sincronizar</button>
+    <button id="btn-salvar-local" onclick="salvarNoPC()" title="Baixar todos os dados no seu computador" style="background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.35);color:#10b981;font-size:10px;font-weight:700;padding:3px 10px;border-radius:5px;cursor:pointer;font-family:'Syne',sans-serif;white-space:nowrap">💾 Salvar</button>
     <span id="user-display" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--accent2);white-space:nowrap"></span>
     <button onclick="doLogout()" style="background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);color:var(--red);font-size:10px;font-weight:700;padding:3px 10px;border-radius:5px;cursor:pointer;font-family:'Syne',sans-serif;white-space:nowrap">Sair</button>
     <div class="sdot"></div>
@@ -8503,88 +8505,32 @@ const _FB_CONFIG = {
 };
 
 const FB_SYNC_KEYS = [
-  'empresas','placas','lojas','tiposCombustivel',
+  'empresas','placas','lojas','tiposCombustivel','prolaboreNomes',
   'lancamentosDiesel','requisicoesPecas',
   'diesel_ultimo_backup','diesel_historico_restore',
   'diesel_tanques','diesel_lancamentos','diesel_ajustes',
   'diesel_veiculos','diesel_lastPrices',
   'nfe_control_data_v1',
-  'gesttor_paiotti_v1','gesttor_last_push',
+  'gesttor_paiotti_v1','gesttor_paiotti_v1_bak','gesttor_last_push',
   'gesttor_sys_users_v1'
 ];
 
+// ─── REFERÊNCIAS NATIVAS DO LOCALSTORAGE ─────────────────────────────────────
+// Guardamos ANTES de qualquer sobrescrita para evitar loop infinito
+const _lsSet    = Storage.prototype.setItem.bind(localStorage);
+const _lsGet    = Storage.prototype.getItem.bind(localStorage);
+const _lsRemove = Storage.prototype.removeItem.bind(localStorage);
+
+// _origLS: camada segura que usa sempre o nativo do browser
+const _origLS = {
+  setItem:    function(k, v) { try { _lsSet(k, String(v)); } catch(e) { console.warn('[LS] setItem falhou:', k, e); } },
+  getItem:    function(k)    { try { return _lsGet(k); }    catch(e) { return null; } },
+  removeItem: function(k)    { try { _lsRemove(k); }        catch(e) {} }
+};
+
 let _fbApp, _fbFS, _fbReady = false;
-const _fbTimers = {};
 
-const _origLS = (function() {
-  const _mem = {};
-  function _testLS() { try { localStorage.setItem('__ls_test__','1'); localStorage.removeItem('__ls_test__'); return true; } catch(e) { return false; } }
-  const _lsOk = _testLS();
-  if (!_lsOk) console.warn('[GESTTOR] localStorage bloqueado — usando memória. Dados não persistirão.');
-  return {
-    setItem: function(k,v) { _mem[k]=String(v); if(_lsOk){try{localStorage.setItem(k,v);}catch(e){}} },
-    getItem: function(k) { if(_lsOk){try{var r=localStorage.getItem(k);if(r!==null){_mem[k]=r;return r;}}catch(e){}} return k in _mem?_mem[k]:null; },
-    removeItem: function(k) { delete _mem[k]; if(_lsOk){try{localStorage.removeItem(k);}catch(e){}} }
-  };
-})();
-
-localStorage.getItem = function(key) { return _origLS.getItem(key); };
-localStorage.setItem = function(key, value) {
-  _origLS.setItem(key, value);
-  if (_fbReady && FB_SYNC_KEYS.includes(key)) {
-    clearTimeout(_fbTimers[key]);
-    _fbTimers[key] = setTimeout(function() {
-      _fbFS.collection('storage').doc(key)
-        .set({ value: value, ts: Date.now() })
-        .catch(function(e) { console.warn('[FB] Erro salvar:', key, e); });
-    }, 800);
-  }
-};
-localStorage.removeItem = function(key) {
-  _origLS.removeItem(key);
-  if (_fbReady && FB_SYNC_KEYS.includes(key)) {
-    _fbFS.collection('storage').doc(key).delete().catch(function(){});
-  }
-};
-
-window.addEventListener('message', function(e) {
-  if (!e.data || !_fbReady) return;
-  if (e.data.type === 'fbSave' && FB_SYNC_KEYS.includes(e.data.key)) {
-    _origLS.setItem(e.data.key, e.data.value);
-    clearTimeout(_fbTimers[e.data.key]);
-    _fbTimers[e.data.key] = setTimeout(function() {
-      _fbFS.collection('storage').doc(e.data.key)
-        .set({ value: e.data.value, ts: Date.now() })
-        .catch(function(e) { console.warn('[FB] Erro msg iframe:', e); });
-    }, 800);
-  }
-  if (e.data.type === 'fbDelete' && FB_SYNC_KEYS.includes(e.data.key)) {
-    _origLS.removeItem(e.data.key);
-    _fbFS.collection('storage').doc(e.data.key).delete().catch(function(){});
-  }
-});
-
-function _fbInjectIframe(iframe) {
-  try {
-    var iDoc = iframe.contentDocument || iframe.contentWindow.document;
-    var s = iDoc.createElement('script');
-    s.textContent = '(function(){var _s=localStorage.setItem.bind(localStorage);var _r=localStorage.removeItem.bind(localStorage);localStorage.setItem=function(k,v){_s(k,v);window.parent.postMessage({type:"fbSave",key:k,value:v},"*");};localStorage.removeItem=function(k){_r(k);window.parent.postMessage({type:"fbDelete",key:k},"*");};})();';
-    iDoc.head.insertBefore(s, iDoc.head.firstChild);
-  } catch(e) { console.warn('[FB] Erro inject iframe:', e); }
-}
-function _fbAttachIframes() {
-  ['despesa-iframe','bombadiesel-iframe','nffutura-iframe'].forEach(function(id) {
-    var fr = document.getElementById(id);
-    if (!fr) return;
-    var inject = function() { _fbInjectIframe(fr); };
-    try {
-      if (fr.contentDocument && fr.contentDocument.readyState === 'complete') inject();
-      else fr.addEventListener('load', inject);
-    } catch(e) { fr.addEventListener('load', inject); }
-  });
-}
-
-// Inicia Firebase em background — site abre imediatamente
+// Inicia Firebase em background — site abre imediatamente sem travar
 setTimeout(function() {
   (async function() {
     try {
@@ -8594,6 +8540,7 @@ setTimeout(function() {
         _fbFS.collection('storage').get(),
         new Promise(function(_, rej) { setTimeout(function(){ rej(new Error('timeout')); }, 8000); })
       ]);
+      // Carrega dados da nuvem para o localStorage local
       snap.forEach(function(doc) {
         if (FB_SYNC_KEYS.includes(doc.id)) {
           var val = doc.data().value;
@@ -8601,28 +8548,9 @@ setTimeout(function() {
         }
       });
       _fbReady = true;
-      console.log('[Firebase] Conectado e sincronizado.');
-      _fbFS.collection('storage').onSnapshot(function(snap) {
-        snap.docChanges().forEach(function(change) {
-          if (!FB_SYNC_KEYS.includes(change.doc.id)) return;
-          var key = change.doc.id;
-          if (change.type === 'removed') {
-            _origLS.removeItem(key);
-          } else {
-            var val = change.doc.data().value;
-            if (val != null) {
-              _origLS.setItem(key, val);
-              ['despesa-iframe','bombadiesel-iframe','nffutura-iframe'].forEach(function(id) {
-                var fr = document.getElementById(id);
-                if (fr && fr.contentWindow) fr.contentWindow.postMessage({ type:'fbDataUpdate', key:key, value:val }, '*');
-              });
-            }
-          }
-        });
-      }, function(err) { console.warn('[FB] Snapshot error:', err); });
-      _fbAttachIframes();
+      console.log('[Firebase] Conectado.');
     } catch(e) {
-      console.warn('[Firebase] Offline — usando dados locais:', e);
+      console.warn('[Firebase] Offline — dados locais preservados:', e.message);
       _fbReady = false;
     }
   })();
@@ -8686,13 +8614,14 @@ function setSyncStatus(state) {
   const ind = document.getElementById('sync-indicator');
   const dot = document.getElementById('sync-dot');
   const lbl = document.getElementById('sync-label');
+  const btn = document.getElementById('btn-sync-manual');
   if(!ind) return;
   ind.style.display = 'flex';
   const map = {
     online:   { color:'#10b981', bg:'rgba(16,185,129,.1)',  border:'rgba(16,185,129,.25)', text:'Sincronizado' },
     syncing:  { color:'#f59e0b', bg:'rgba(245,158,11,.1)', border:'rgba(245,158,11,.25)', text:'Sincronizando…' },
-    offline:  { color:'#ef4444', bg:'rgba(239,68,68,.1)',   border:'rgba(239,68,68,.25)',  text:'Offline' },
-    pending:  { color:'#f97316', bg:'rgba(249,115,22,.1)',  border:'rgba(249,115,22,.25)', text:'Pendente' },
+    offline:  { color:'#ef4444', bg:'rgba(239,68,68,.1)',   border:'rgba(239,68,68,.25)',  text:'Offline — salvo local' },
+    pending:  { color:'#f97316', bg:'rgba(249,115,22,.1)',  border:'rgba(249,115,22,.25)', text:'Pendente envio' },
     error:    { color:'#ef4444', bg:'rgba(239,68,68,.1)',   border:'rgba(239,68,68,.25)',  text:'Erro sync' },
   };
   const s = map[state] || map.offline;
@@ -8702,6 +8631,147 @@ function setSyncStatus(state) {
   lbl.style.color = s.color;
   ind.style.background = s.bg;
   ind.style.border = `1px solid ${s.border}`;
+  // Botão sempre visível — não altera display
+}
+
+// ══════════════════════════════════════════════════
+// SALVAR NO PC — baixa JSON com todos os dados
+// ══════════════════════════════════════════════════
+function salvarNoPC() {
+  const btn = document.getElementById('btn-salvar-local');
+  if(btn) { btn.textContent = '⏳ Salvando…'; btn.disabled = true; }
+  try {
+    // Garante que tudo está escrito no localStorage antes de exportar
+    saveDataLocal();
+
+    // Lista completa de todas as chaves do sistema
+    const TODAS_CHAVES = [
+      // Módulo Principal (boletos, fretes, contatos, motoristas)
+      'gesttor_paiotti_v1',
+      'gesttor_paiotti_v1_bak',
+      // Módulo Despesa — configurações
+      'empresas',
+      'placas',
+      'lojas',
+      'tiposCombustivel',
+      'prolaboreNomes',
+      // Módulo Despesa — lançamentos
+      'lancamentosDiesel',
+      'requisicoesPecas',
+      // Módulo Bomba Diesel
+      'diesel_tanques',
+      'diesel_lancamentos',
+      'diesel_ajustes',
+      'diesel_veiculos',
+      'diesel_lastPrices',
+      'diesel_ultimo_backup',
+      'diesel_historico_restore',
+      // NF Futura
+      'nfe_control_data_v1',
+      // Usuários
+      'gesttor_sys_users_v1',
+      // Controle sync
+      'gesttor_last_push',
+    ];
+
+    const dados = {};
+    let totalRegistros = 0;
+    TODAS_CHAVES.forEach(function(k) {
+      const v = _origLS.getItem(k);
+      if(v !== null && v !== undefined) {
+        dados[k] = v;
+        try {
+          const parsed = JSON.parse(v);
+          if(Array.isArray(parsed)) totalRegistros += parsed.length;
+        } catch(e){}
+      }
+    });
+
+    if(Object.keys(dados).length === 0) {
+      alert('⚠️ Nenhum dado encontrado para salvar.\nFaça algum lançamento primeiro.');
+      return;
+    }
+
+    const arquivo = {
+      sistema: 'GESTTOR Paiotti',
+      versao: 2,
+      salvoEm: new Date().toLocaleString('pt-BR'),
+      salvoEmISO: new Date().toISOString(),
+      totalChaves: Object.keys(dados).length,
+      totalRegistros: totalRegistros,
+      dados: dados
+    };
+
+    const blob = new Blob([JSON.stringify(arquivo, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = 'GESTTOR_salvo_' + new Date().toISOString().slice(0,10) + '_' + new Date().toTimeString().slice(0,5).replace(':','h') + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    if(btn) {
+      btn.textContent = '✅ Salvo!';
+      setTimeout(function(){ btn.textContent = '💾 Salvar'; btn.disabled = false; }, 2500);
+    }
+  } catch(e) {
+    alert('❌ Erro ao salvar: ' + e.message);
+    if(btn) { btn.textContent = '💾 Salvar'; btn.disabled = false; }
+  }
+}
+
+async function syncManual() {
+  const btn = document.getElementById('btn-sync-manual');
+  if(btn) { btn.textContent = '⏳ Enviando…'; btn.disabled = true; }
+  try {
+    if(!navigator.onLine) {
+      setSyncStatus('offline');
+      alert('⚠️ Sem conexão com a internet.\nSeus dados estão salvos localmente no navegador.');
+      return;
+    }
+    setSyncStatus('syncing');
+    let fbOk = false;
+    let sbOk = false;
+
+    // 1) Firebase — sobe TODAS as chaves do sistema
+    if(_fbReady && _fbFS) {
+      try {
+        const batch = _fbFS.batch();
+        FB_SYNC_KEYS.forEach(function(k) {
+          const v = _origLS.getItem(k);
+          if(v != null) {
+            const ref = _fbFS.collection('storage').doc(k);
+            batch.set(ref, { value: v, ts: Date.now() });
+          }
+        });
+        await batch.commit();
+        fbOk = true;
+        console.log('[Firebase] Sync manual OK');
+      } catch(e) {
+        console.warn('[Firebase] Erro no sync manual:', e);
+      }
+    }
+
+    // 2) Supabase — módulos principais (boletos, fretes, contatos)
+    _isOnline = true;
+    sbOk = await syncPush();
+
+    if(fbOk || sbOk) {
+      setSyncStatus('online');
+      if(btn) btn.textContent = '✅ Sincronizado!';
+      setTimeout(() => { if(btn) { btn.textContent = '☁️ Sincronizar'; btn.disabled = false; } }, 2500);
+    } else {
+      setSyncStatus('error');
+      alert('❌ Não foi possível conectar à nuvem.\nSeus dados continuam salvos localmente no navegador.');
+      if(btn) btn.disabled = false;
+    }
+  } catch(e) {
+    setSyncStatus('error');
+    console.warn('syncManual erro:', e);
+    if(btn) btn.disabled = false;
+  }
 }
 
 // Fila offline
@@ -8848,57 +8918,47 @@ function refreshAllModules() {
 // ---- saveData: salva local + agenda sync ----
 function saveDataLocal() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    const payload = JSON.stringify({
       db, nxtId, empresaDb,
       contatosDb_saved: contatosDb, cntNxtId_saved: cntNxtId,
       fretesDb_saved: fretesDb, fNxtId_saved: fNxtId,
       motDb_saved: motDb, motNxtId_saved: motNxtId
-    }));
+    });
+    // Usa _origLS (nativo) para garantir que salva de verdade no localStorage
+    _origLS.setItem(STORAGE_KEY, payload);
+    _origLS.setItem(STORAGE_KEY + '_bak', payload);
   } catch(e){ console.warn('Erro ao salvar local:', e); }
 }
 
 function saveData() {
   saveDataLocal();
-  if(_isOnline) {
-    setSyncStatus('syncing');
-    clearTimeout(_syncTimer);
-    _syncTimer = setTimeout(syncPush, 1500); // debounce 1.5s
-  } else {
-    setSyncStatus('pending');
-    enqueue({ table: 'all', id: 'all', ts: Date.now() });
-  }
+  setSyncStatus('pending');
 }
 
 function loadSavedData(){
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) return null;
-    return JSON.parse(raw);
-  } catch(e){ console.warn('Erro ao carregar:', e); return null; }
+    const raw = _origLS.getItem(STORAGE_KEY);
+    if(raw) return JSON.parse(raw);
+  } catch(e){ console.warn('Erro ao carregar principal:', e); }
+  // Tenta backup de segurança
+  try {
+    const bak = _origLS.getItem(STORAGE_KEY + '_bak');
+    if(bak) { console.warn('[GESTTOR] Usando backup de segurança dos dados.'); return JSON.parse(bak); }
+  } catch(e2){ console.warn('Erro ao carregar backup:', e2); }
+  return null;
 }
 
-// ---- Online/Offline listeners ----
-window.addEventListener('online', async () => {
+// ---- Online/Offline listeners — só atualiza indicador, não sincroniza automaticamente ----
+window.addEventListener('online', () => {
   _isOnline = true;
-  setSyncStatus('syncing');
-  const q = getQueue();
-  if(q.length) {
-    await syncPush();
-  } else {
-    await syncPull();
-  }
+  setSyncStatus('pending');
 });
 window.addEventListener('offline', () => {
   _isOnline = false;
   setSyncStatus('offline');
 });
 
-// ---- Sync periódico a cada 30s (pull para detectar mudanças de outros usuários) ----
-setInterval(async () => {
-  if(_isOnline && document.visibilityState === 'visible') {
-    await syncPull();
-  }
-}, 30000);
+// Sync periódico desativado — sincroniza só pelo botão manual
 
 const _saved = loadSavedData();
 
@@ -9970,7 +10030,7 @@ async function verifyPass(plain, stored) {
 }
 
 function sysLoadUsers() {
-  try { const raw=localStorage.getItem(SYS_KEY); if(raw) return JSON.parse(raw); } catch(e){}
+  try { const raw=_origLS.getItem(SYS_KEY); if(raw) return JSON.parse(raw); } catch(e){}
   return null;
 }
 function sysStoreUsers(users) {
@@ -10087,9 +10147,8 @@ async function doLogin() {
   document.getElementById('user-display').textContent='👤 '+userMatch.username;
   document.querySelector('main').style.display='block';
   applyPermissions(userMatch);
-  // Sync inicial após login
-  setSyncStatus(_isOnline ? 'syncing' : 'offline');
-  if(_isOnline) syncPull();
+  // Status inicial após login — não sincroniza automaticamente
+  setSyncStatus(_isOnline ? 'pending' : 'offline');
 }
 
 function doLogout() {
